@@ -251,6 +251,7 @@ function renderRecords(items) {
   tb.innerHTML = "";
   for (const r of items) {
     const tr = document.createElement("tr");
+    tr.dataset.line = String(r.src_line);
     tr.innerHTML = `<td>${escapeHtml(r.card)}</td><td>${r.time}</td>
       <td>${escapeHtml(r.station)}</td><td>${actionText(r.action)}</td>
       <td class="num">第 ${r.src_line} 行</td>`;
@@ -810,6 +811,146 @@ async function runDurationAudit() {
   }
 }
 
+/* ---------------- 10. 站点闸机峰值审计（只读） ---------------- */
+
+let lastGatePeakData = null;
+
+function renderGatePeakErrors(errors) {
+  const ul = $("gate-peak-errors-list");
+  ul.innerHTML = "";
+  for (const e of errors) ul.appendChild(renderErrorLi(e));
+  $("gate-peak-errors").hidden = false;
+  $("gate-peak-result").hidden = true;
+}
+
+function renderGatePeak(data) {
+  $("gate-peak-errors").hidden = true;
+  $("gate-peak-result").hidden = false;
+  lastGatePeakData = data;
+
+  const onlyAlert = $("peak-only-alert").checked;
+  const groups = (data.groups || []).filter(
+    (g) => !onlyAlert || g.alert);
+  const hiddenNote = onlyAlert && data.alert_count < data.group_count
+    ? `（已隐藏 ${data.group_count - data.alert_count} 个未告警组）` : "";
+  const alertText = data.min_alert_count === null
+    ? "未设置最低告警数（所有组均不标记）"
+    : `最低告警数 <strong>${data.min_alert_count}</strong>，达标组 ` +
+      `<strong>${data.alert_count}</strong> / ${data.group_count} 个`;
+
+  $("gate-peak-summary").innerHTML =
+    `窗口长度 <strong>${data.window_minutes}</strong> 分钟（半开区间 [开始, 结束)，` +
+    `候选窗口只从实际刷卡时刻起算）：共 <strong>${data.group_count}</strong> 个` +
+    `站点×方向分组，按峰值刷卡数降序、并列时按更早开始时刻 / 站点名排序。${hiddenNote}` +
+    `<br><span class="sub">${alertText}；审计全程只读：未修改记录、配置或账单。</span>`;
+
+  const tb = $("gate-peak-table").querySelector("tbody");
+  tb.innerHTML = "";
+  for (const g of groups) {
+    const tr = document.createElement("tr");
+    if (g.alert) tr.className = "alert-row";
+    const alertCell = g.alert
+      ? `<span class="tag tag-alert">⚠ 告警</span>`
+      : `<span class="tag tag-normal">正常</span>`;
+    tr.innerHTML = `
+      <td>${alertCell}</td>
+      <td>${escapeHtml(g.station)}</td>
+      <td><span class="dir ${g.action === "IN" ? "dir-in" : "dir-out"}">` +
+        `${g.action === "IN" ? "进 ▲" : "出 ▼"} ${escapeHtml(g.action_text)}</span></td>
+      <td class="num charge">${g.peak_count}</td>
+      <td class="num">${g.distinct_cards}</td>
+      <td class="num">${g.swipe_count}</td>
+      <td>${g.start_time}</td>
+      <td>${g.end_time}</td>
+      <td class="num">${g.window_minutes}</td>
+      <td class="lines-cell"></td>`;
+    const cell = tr.querySelector(".lines-cell");
+    for (const line of g.lines) {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "line-chip";
+      chip.textContent = `第 ${line} 行`;
+      chip.title = g.swipes.filter((s) => s.line === line).map((s) =>
+        `${s.card} · ${s.time}`).join("\n");
+      chip.addEventListener("click", () => locateRecordLine(line));
+      cell.appendChild(chip);
+    }
+    tb.appendChild(tr);
+  }
+}
+
+function locateRecordLine(line) {
+  const row = $("records-table").querySelector(
+    `tbody tr[data-line="${CSS.escape(String(line))}"]`);
+  if (!row) {
+    toast(`第 ${line} 行不在当前已保存记录中（可能记录已更新），请先在第 5 区保存`, false);
+    return;
+  }
+  $("sec-records").scrollIntoView({ behavior: "smooth", block: "center" });
+  for (const tr of $("records-table").querySelectorAll("tbody tr")) {
+    tr.classList.remove("line-flash");
+  }
+  row.classList.add("line-flash");
+  clearTimeout(locateRecordLine._t);
+  locateRecordLine._t = setTimeout(
+    () => row.classList.remove("line-flash"), 2400);
+}
+
+async function runGatePeakAudit() {
+  const status = $("gate-peak-status");
+  const windowMinutes = Number($("peak-window").value);
+  const alertRaw = $("peak-min-alert").value.trim();
+  const minAlertCount = alertRaw === "" ? null : Number(alertRaw);
+
+  if (!Number.isInteger(windowMinutes) || windowMinutes < 1 || windowMinutes > 120) {
+    status.textContent = "窗口长度必须是 1～120 之间的整数分钟";
+    status.className = "status bad";
+    return;
+  }
+  if (minAlertCount !== null &&
+      (!Number.isInteger(minAlertCount) || minAlertCount < 1)) {
+    status.textContent = "最低告警数必须是不小于 1 的整数，或留空表示不告警";
+    status.className = "status bad";
+    return;
+  }
+
+  status.textContent = "审计中…";
+  status.className = "status";
+  $("gate-peak-errors").hidden = true;
+  $("gate-peak-result").hidden = true;
+  try {
+    const body = { window_minutes: windowMinutes };
+    if (minAlertCount !== null) body.min_alert_count = minAlertCount;
+    const data = await api("/api/gate-peak-audit", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    renderGatePeak(data);
+    if (!data.group_count) {
+      status.textContent = "没有可统计的已保存刷卡记录（只读，未改动数据）";
+    } else if (data.alert_count > 0) {
+      status.textContent =
+        `审计完成：${data.group_count} 个分组，其中 ${data.alert_count} 个达到告警标准` +
+        "（只读，记录 / 配置 / 账单均未改动）";
+    } else {
+      status.textContent =
+        `审计完成：共 ${data.group_count} 个分组，无达标告警组（只读，未改动数据）`;
+    }
+    status.className = "status ok";
+    toast("闸机峰值审计完成（只读，未保存任何改动）");
+  } catch (e) {
+    const errors = (e.payload && e.payload.errors) || [];
+    if (errors.length) {
+      renderGatePeakErrors(errors);
+      status.textContent = summaryError(e, "参数有误，未生成审计结果");
+    } else {
+      status.textContent = summaryError(e, "闸机峰值审计请求失败");
+    }
+    status.className = "status bad";
+    toast("无法执行闸机峰值审计", false);
+  }
+}
+
 /* ---------------- 演示数据 ---------------- */
 
 const DEMO = {
@@ -904,6 +1045,10 @@ function bind() {
   $("btn-repair").addEventListener("click", runRepairPreview);
   $("btn-fare-audit").addEventListener("click", runFareAudit);
   $("btn-duration-audit").addEventListener("click", runDurationAudit);
+  $("btn-gate-peak").addEventListener("click", runGatePeakAudit);
+  $("peak-only-alert").addEventListener("change", () => {
+    if (lastGatePeakData) renderGatePeak(lastGatePeakData);
+  });
   $("btn-copy-suggests").addEventListener("click", copyAllSuggests);
   $("btn-verify").addEventListener("click", runVerify);
   $("btn-verify-top").addEventListener("click", runVerify);

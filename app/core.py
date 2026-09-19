@@ -1236,3 +1236,141 @@ def duration_audit(stations: list[Station],
         anomalies=anomalies,
         insufficient=insufficient,
     )
+
+
+# ---------------------------------------------------------------------------
+# 站点闸机峰值审计（只读：不改记录、配置或账单）
+# ---------------------------------------------------------------------------
+
+# 峰值窗口长度允许范围（分钟）：用户给定，闭区间 1～120
+PEAK_MIN_WINDOW_MINUTES = 1
+PEAK_MAX_WINDOW_MINUTES = 120
+
+
+@dataclass
+class GatePeakAudit:
+    """站点闸机峰值审计结果。
+
+    ok=False 时 errors 为参数校验错误（CONFIG_BAD，窗口长度不在 1～120、
+    最低告警数非法），不生成任何分组结果。
+    ok=True 时 groups 为每个（站点, 进/出方向）分组的峰值窗口，
+    排序规则：峰值刷卡数降序 → 更早开始时刻 → 站点名 → 进(IN)先于出(OUT)。
+    每个分组带 alert 标记：仅当设置了最低告警数且峰值刷卡数达标时为 True。
+    """
+    ok: bool
+    window_minutes: int = 0
+    min_alert_count: Optional[int] = None
+    group_count: int = 0
+    alert_count: int = 0
+    groups: list[dict] = field(default_factory=list)
+    errors: list[dict] = field(default_factory=list)
+
+
+def station_gate_peak_audit(records: list[Swipe],
+                            window_minutes,
+                            min_alert_count=None) -> GatePeakAudit:
+    """站点闸机峰值审计（全程只读：不改记录、配置或账单）。
+
+    直接读取已保存的**原始刷卡记录**逐条统计（不做进出配对、不剔除
+    重复刷卡、不依赖站点分区 / 票价 / 核验配置），按（站点, 进/出方向）
+    分组，在每组内查找刷卡数最多的半开区间 [开始, 结束)：
+
+    - 窗口长度由用户给定，取 1～120 之间的整数分钟；
+    - 候选窗口只从**实际刷卡时刻**起算（结束 = 开始 + 窗口长度），
+      因此不会像固定整点分桶那样漏掉跨边界高峰；区间半开，恰好落在
+      结束时刻的刷卡不计入；
+    - 组内同刷卡数并列时取**更早开始时刻**的候选窗口（候选起点按
+      时刻升序枚举，严格更多才替换，首个最优自然保留）；
+    - 组间返回顺序：峰值刷卡数降序 → 开始时刻升序 → 站点名升序 →
+      进(IN)先于出(OUT)；
+    - 每组给出峰值刷卡数、窗口起止时刻、窗口内涉及卡号数、原始行号
+      与逐笔明细；设置最低告警数（≥1 的整数）时，仅峰值刷卡数达标的
+      分组标记 alert=True；不设置则所有分组均不告警。
+    """
+    errors: list[dict] = []
+    if not _is_int_value(window_minutes) \
+            or not (PEAK_MIN_WINDOW_MINUTES <= window_minutes
+                    <= PEAK_MAX_WINDOW_MINUTES):
+        errors.append(_err(
+            "CONFIG_BAD",
+            f"窗口长度必须是 {PEAK_MIN_WINDOW_MINUTES}～"
+            f"{PEAK_MAX_WINDOW_MINUTES} 之间的整数分钟"))
+    if min_alert_count is not None and (
+            not _is_int_value(min_alert_count) or min_alert_count < 1):
+        errors.append(_err("CONFIG_BAD", "最低告警数必须是不小于 1 的整数，"
+                                         "或留空表示不告警"))
+    if errors:
+        return GatePeakAudit(ok=False, errors=errors)
+
+    window_minutes = int(window_minutes)
+    min_alert_count = (int(min_alert_count)
+                       if min_alert_count is not None else None)
+    width = timedelta(minutes=window_minutes)
+
+    # （站点, 方向）-> 该分组的全部刷卡记录
+    by_group: dict[tuple[str, str], list[Swipe]] = {}
+    for r in records:
+        by_group.setdefault((r.station, r.action), []).append(r)
+
+    groups: list[dict] = []
+    for (station, action), rs in by_group.items():
+        # 候选起点按 (时刻, 行号) 升序枚举；同卡重复时刻也各自保留，
+        # 因为峰值审计按原始记录逐条计数，不做去重。
+        rs.sort(key=lambda r: (r.t, r.line))
+        n = len(rs)
+
+        # 滑动窗口：对每个候选起点 left，右端点为首个 t >= 起点+宽度
+        # 的位置（半开区间）。right 只随 left 单调右移，O(n)。
+        right = 0
+        best_count = -1
+        best_left = 0
+        for left in range(n):
+            if right < left:
+                right = left
+            end_t = rs[left].t + width
+            while right < n and rs[right].t < end_t:
+                right += 1
+            count = right - left
+            # 严格更多才替换：count 相同保留更早（left 更小）的候选
+            if count > best_count:
+                best_count = count
+                best_left = left
+
+        start = rs[best_left].t
+        end = start + width
+        members = [r for r in rs if start <= r.t < end]
+        distinct_cards = len({r.card for r in members})
+        lines = sorted({r.line for r in members})
+        alert = min_alert_count is not None and best_count >= min_alert_count
+
+        groups.append({
+            "station": station,
+            "action": action,
+            "action_text": "进站" if action == ACTION_IN else "出站",
+            "swipe_count": n,
+            "peak_count": best_count,
+            "distinct_cards": distinct_cards,
+            "window_minutes": window_minutes,
+            "start_time": start.strftime("%Y-%m-%d %H:%M:%S"),
+            "end_time": end.strftime("%Y-%m-%d %H:%M:%S"),
+            "lines": lines,
+            "swipes": [{
+                "card": r.card,
+                "time": r.time_text,
+                "line": r.line,
+            } for r in members],
+            "alert": alert,
+        })
+
+    # 组间排序：峰值降序 → 更早开始时刻 → 站点名 → 进先于出
+    groups.sort(key=lambda g: (-g["peak_count"], g["start_time"],
+                               g["station"], g["action"]))
+
+    return GatePeakAudit(
+        ok=True,
+        window_minutes=window_minutes,
+        min_alert_count=min_alert_count,
+        group_count=len(groups),
+        alert_count=sum(1 for g in groups if g["alert"]),
+        groups=groups,
+    )

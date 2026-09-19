@@ -339,3 +339,53 @@ td.wrap { white-space: normal; min-width: 240px; }
 /* ---------------- 行程耗时异常审计 ---------------- */
 .tag-long { background: var(--danger-text); }
 .tag-short { background: #b7791f; }
+
+/* ---------------- 站点闸机峰值审计 ---------------- */
+.inline-check {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+.inline-check input { width: auto; }
+
+.tag-alert { background: var(--danger-text); }
+.tag-normal { background: var(--muted); }
+tr.alert-row { background: #fdf3f3 !important; }
+tr.alert-row td { border-color: #eccaca; }
+
+.dir { font-weight: 600; }
+.dir-in { color: var(--primary-dark); }
+.dir-out { color: #b7791f; }
+
+.lines-cell {
+  white-space: normal;
+  min-width: 220px;
+  max-width: 360px;
+}
+.line-chip {
+  font: inherit;
+  font-size: 12px;
+  border: 1px solid var(--primary);
+  background: #fff;
+  color: var(--primary);
+  border-radius: 4px;
+  padding: 1px 8px;
+  margin: 2px 4px 2px 0;
+  cursor: pointer;
+}
+.line-chip:hover { background: #eef3fe; }
+
+@keyframes lineflash {
+  0% { background: #ffe9a8; }
+  100% { background: transparent; }
+}
+#records-table tbody tr.line-flash {
+  animation: lineflash 2.4s ease-out;
+}
+#records-table tbody tr.line-flash td {
+  background: #fff4df;
+  font-weight: 600;
+}

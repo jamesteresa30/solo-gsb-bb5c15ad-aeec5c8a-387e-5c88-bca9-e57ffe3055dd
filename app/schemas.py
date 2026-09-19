@@ -1,6 +1,8 @@
 """API 请求模型。"""
 from __future__ import annotations
 
+from typing import Optional
+
 from pydantic import BaseModel, Field
 
 
@@ -25,3 +27,18 @@ class TrialConfigIn(BaseModel):
     transfer_discount: float = Field(description="草案：换乘抵扣额（元）")
     daily_cap: float = Field(description="草案：每卡每运营日封顶额（元）")
     day_split_hour: float = Field(description="草案：运营日分界时刻（0-23）")
+
+
+class GatePeakAuditIn(BaseModel):
+    """站点闸机峰值审计参数。
+
+    window_minutes 在请求层约束为 1～120 的整数；核心层再做一次
+    校验（返回 CONFIG_BAD），保证直接调用 core 时非法值也被拦截。
+    min_alert_count 留空（null）表示不设置最低告警数，所有分组均
+    不标记 alert；填写时必须为 ≥1 的整数。
+    """
+    window_minutes: int = Field(ge=1, le=120,
+                                description="峰值窗口长度（分钟），1～120")
+    min_alert_count: Optional[int] = Field(
+        default=None, ge=1,
+        description="最低告警数；峰值刷卡数达到该值的分组才标记告警")

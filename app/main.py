@@ -19,11 +19,12 @@ from .core import (
     parse_records_text,
     parse_stations_text,
     repair_preview,
+    station_gate_peak_audit,
     trial_compare,
     validate_config,
     verify,
 )
-from .schemas import ConfigIn, TextIn, TrialConfigIn
+from .schemas import ConfigIn, GatePeakAuditIn, TextIn, TrialConfigIn
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
@@ -38,7 +39,7 @@ app = FastAPI(
     title="公交刷卡票价核验台",
     description="录入站点分区、票价矩阵、换乘抵扣、每日封顶与刷卡记录，"
                 "按卡号配对进出站并核验计价。",
-    version="1.3.0",
+    version="1.4.0",
     lifespan=lifespan,
 )
 
@@ -340,6 +341,46 @@ def run_duration_audit():
         "anomaly_count": len(result.anomalies),
         "anomalies": result.anomalies,
         "insufficient": result.insufficient,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 站点闸机峰值审计（只读：不改记录、配置或账单）
+# ---------------------------------------------------------------------------
+
+@app.post("/api/gate-peak-audit")
+def run_gate_peak_audit(body: GatePeakAuditIn):
+    """对已保存刷卡记录做站点闸机峰值审计。
+
+    - 直接逐条统计已保存的原始刷卡记录（不做进出配对、不剔除重复刷卡、
+      不依赖站点分区与票价配置），按（站点, 进/出方向）分组；
+    - 在每组内于用户给定的 1～120 分钟窗口里查找刷卡数最多的半开区间
+      [开始, 结束)，候选窗口只从实际刷卡时刻起算，避免固定整点分桶
+      漏掉跨边界高峰；
+    - 数量并列时依次按更早开始时刻、站点名（以及进先于出）稳定排序；
+    - 返回每组峰值刷卡数、起止时刻、涉及卡号数、原始行号与逐笔明细；
+      设置最低告警数时仅标记达标组（alert=true）；
+    - 全程只读：不修改记录、配置，也不写入或清空账单。
+    """
+    with db.connect() as conn:
+        _stations, _fares, records = db.load_domain(conn)
+        result = station_gate_peak_audit(
+            records,
+            window_minutes=body.window_minutes,
+            min_alert_count=body.min_alert_count)
+
+    if not result.ok:
+        return JSONResponse(
+            status_code=422,
+            content={"ok": False, "errors": result.errors})
+
+    return {
+        "ok": True,
+        "window_minutes": result.window_minutes,
+        "min_alert_count": result.min_alert_count,
+        "group_count": result.group_count,
+        "alert_count": result.alert_count,
+        "groups": result.groups,
     }
 
 
