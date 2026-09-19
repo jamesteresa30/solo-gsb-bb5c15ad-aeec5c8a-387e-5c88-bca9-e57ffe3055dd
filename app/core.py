@@ -1100,6 +1100,162 @@ def fare_path_audit(stations: list[Station],
 
 
 # ---------------------------------------------------------------------------
+# 站点闸机峰值审计（只读：不改记录、配置或账单）
+# ---------------------------------------------------------------------------
+
+# 统计窗口允许的分钟数范围
+PEAK_WINDOW_MIN_MINUTES = 1
+PEAK_WINDOW_MAX_MINUTES = 120
+# 默认最低告警数：峰值刷卡数 >= 该值的组才标记 alert
+PEAK_DEFAULT_MIN_ALERT = 1
+
+ACTION_LABELS = {"IN": "进", "OUT": "出"}
+
+# 审计结果中时刻的展示格式（与 Swipe.time_text 一致，精确到秒）
+_PEAK_TIME_FMT = "%Y-%m-%d %H:%M:%S"
+
+
+@dataclass
+class PeakAudit:
+    """站点闸机峰值审计结果。
+
+    参数非法（窗口分钟数不是 1-120 的整数、最低告警数不是正整数）时
+    ok=False，errors 携带 CONFIG_BAD；ok=True 时 groups 按
+    峰值数量降序、开始时刻升序、站点名、方向稳定排序，每个组给出
+    半开区间 [start, end) 内的峰值刷卡数、涉及卡号数与原始行号。
+    """
+    ok: bool
+    window_minutes: int = 0
+    min_alert: int = 0
+    record_count: int = 0
+    group_count: int = 0
+    alert_count: int = 0
+    groups: list[dict] = field(default_factory=list)
+    errors: list[dict] = field(default_factory=list)
+
+
+def _validate_peak_params(window_minutes, min_alert) -> list[dict]:
+    """峰值审计参数校验，非法时给出与其他接口一致的 CONFIG_BAD 错误。"""
+    errors: list[dict] = []
+    if not _is_int_value(window_minutes) \
+            or not (PEAK_WINDOW_MIN_MINUTES <= int(window_minutes)
+                    <= PEAK_WINDOW_MAX_MINUTES):
+        errors.append(_err(
+            "CONFIG_BAD",
+            f"统计窗口必须为 {PEAK_WINDOW_MIN_MINUTES}～"
+            f"{PEAK_WINDOW_MAX_MINUTES} 之间的整数（分钟）"))
+    if not _is_int_value(min_alert) or int(min_alert) < 1:
+        errors.append(_err(
+            "CONFIG_BAD", "最低告警数必须为不小于 1 的整数"))
+    return errors
+
+
+def _peak_of_group(events: list[Swipe], window: timedelta
+                   ) -> tuple[int, datetime, datetime, int, list[int]]:
+    """单组（同站点同方向）事件上求刷卡数最多的半开区间。
+
+    events 已按时刻升序（同时刻按原始行号稳定排序）。候选起点只取
+    实际刷卡时刻；窗口为 [开始, 开始 + window)，半开区间保证边界
+    时刻的刷卡不会被重复计入。滑动窗口以事件为起点逐个右移，
+    出现并列时先遇到的起点更早，故只在严格更大时更新。
+
+    返回 (峰值刷卡数, 开始时刻, 结束时刻, 涉及卡号数, 原始行号列表)。
+    """
+    best_count = 0
+    best_start_idx = 0
+    best_end_idx = 0
+    right = 0
+    for left in range(len(events)):
+        start = events[left].t
+        limit = start + window
+        if right < left:
+            right = left
+        # 半开区间：时刻严格小于 start + window 才计入
+        while right < len(events) and events[right].t < limit:
+            right += 1
+        count = right - left
+        if count > best_count:
+            best_count = count
+            best_start_idx = left
+            best_end_idx = right
+    start_t = events[best_start_idx].t
+    end_t = start_t + window
+    window_events = events[best_start_idx:best_end_idx]
+    card_count = len({e.card for e in window_events})
+    lines = sorted(e.line for e in window_events)
+    return best_count, start_t, end_t, card_count, lines
+
+
+def station_peak_audit(records: list[Swipe],
+                       window_minutes,
+                       min_alert) -> PeakAudit:
+    """站点闸机峰值审计（全程只读：不改记录、配置或账单）。
+
+    直接统计已保存的刷卡记录（不依赖进出站配对、站点分区与票价）：
+    按（站点, 进/出方向）分组，在给定的 1～120 分钟窗口内查找刷卡数
+    最多的半开区间 [开始, 结束)。候选窗口只从实际刷卡时刻起算，避免
+    固定整点分桶漏掉跨边界高峰；峰值数量并列时取更早的开始时刻
+    （事件按时间顺序扫描，首个最大值即最早起点），组间按峰值数量
+    降序、开始时刻升序、站点名、方向排序。
+
+    - 每组返回峰值刷卡数、窗口起止时刻、涉及卡号数（去重）与
+      窗口内记录的原始文本行号；
+    - 峰值刷卡数 >= min_alert 的组标记 alert=true，其余组照常返回
+      但不标记；
+    - 参数非法（窗口非 1～120 整数、最低告警数非正整数）时返回
+      CONFIG_BAD，不生成审计结果。
+    """
+    errors = _validate_peak_params(window_minutes, min_alert)
+    if errors:
+        return PeakAudit(ok=False, errors=errors)
+    window_minutes = int(window_minutes)
+    min_alert = int(min_alert)
+    window = timedelta(minutes=window_minutes)
+
+    # （站点, 方向）-> 该组全部刷卡事件
+    groups: dict[tuple[str, str], list[Swipe]] = {}
+    for r in records:
+        groups.setdefault((r.station, r.action), []).append(r)
+
+    result_rows: list[dict] = []
+    for (station, action), events in groups.items():
+        events.sort(key=lambda e: (e.t, e.line, e.card))
+        count, start_t, end_t, card_count, lines = _peak_of_group(
+            events, window)
+        result_rows.append({
+            "_peak": count,
+            "_start": start_t,
+            "station": station,
+            "action": action,
+            "direction": ACTION_LABELS.get(action, action),
+            "peak_count": count,
+            "start_time": start_t.strftime(_PEAK_TIME_FMT),
+            "end_time": end_t.strftime(_PEAK_TIME_FMT),
+            "card_count": card_count,
+            "total_count": len(events),
+            "lines": lines,
+            "alert": count >= min_alert,
+        })
+
+    # 组间排序：峰值数量降序，并列时开始时刻更早优先，再按站点名、方向
+    result_rows.sort(key=lambda g: (-g["_peak"], g["_start"],
+                                    g["station"], g["action"]))
+    for g in result_rows:
+        del g["_peak"]
+        del g["_start"]
+
+    return PeakAudit(
+        ok=True,
+        window_minutes=window_minutes,
+        min_alert=min_alert,
+        record_count=len(records),
+        group_count=len(result_rows),
+        alert_count=sum(1 for g in result_rows if g["alert"]),
+        groups=result_rows,
+    )
+
+
+# ---------------------------------------------------------------------------
 # 行程耗时异常审计（只读：不改记录、配置或账单）
 # ---------------------------------------------------------------------------
 

@@ -251,6 +251,7 @@ function renderRecords(items) {
   tb.innerHTML = "";
   for (const r of items) {
     const tr = document.createElement("tr");
+    tr.dataset.srcLine = r.src_line;
     tr.innerHTML = `<td>${escapeHtml(r.card)}</td><td>${r.time}</td>
       <td>${escapeHtml(r.station)}</td><td>${actionText(r.action)}</td>
       <td class="num">第 ${r.src_line} 行</td>`;
@@ -810,6 +811,138 @@ async function runDurationAudit() {
   }
 }
 
+/* ---------------- 10. 站点闸机峰值审计（只读） ---------------- */
+
+function renderPeakErrors(errors) {
+  const ul = $("peak-errors-list");
+  ul.innerHTML = "";
+  for (const e of errors) ul.appendChild(renderErrorLi(e));
+  $("peak-errors").hidden = false;
+  $("peak-result").hidden = true;
+}
+
+function peakLineChips(lines) {
+  return lines.map((ln) =>
+    `<button type="button" class="line-chip" data-line="${ln}">第 ${ln} 行</button>`
+  ).join(" ");
+}
+
+function renderPeakAudit(data) {
+  $("peak-errors").hidden = true;
+  $("peak-result").hidden = false;
+
+  const groups = data.groups || [];
+  const summary = $("peak-summary");
+  if (!groups.length) {
+    summary.innerHTML =
+      `已保存记录数 <strong>${data.record_count}</strong>，没有可统计的站点 / 方向分组。<br>` +
+      `<span class="sub">审计全程只读：未修改记录、配置或账单。</span>`;
+  } else {
+    const alertNote = data.alert_count
+      ? `其中 <strong>${data.alert_count}</strong> 组达到最低告警数 ` +
+        `（≥ ${data.min_alert} 笔），已用 🚨 标记。`
+      : `没有组达到最低告警数（峰值 ≥ ${data.min_alert} 笔才标记）。`;
+    summary.innerHTML =
+      `统计窗口 <strong>${data.window_minutes}</strong> 分钟 · ` +
+      `已保存刷卡 <strong>${data.record_count}</strong> 条 · ` +
+      `<strong>${data.group_count}</strong> 个「站点 × 方向」组，` +
+      `${alertNote}<br>` +
+      `<span class="sub">候选窗口只从实际刷卡时刻起算，采用半开区间 [开始, 结束)；` +
+      `并列时按更早开始时刻、站点名排序。审计全程只读：未修改记录、配置或账单。` +
+      `点击行号可定位到「5. 刷卡记录」中的原始行。</span>`;
+  }
+
+  const tb = $("peak-table").querySelector("tbody");
+  tb.innerHTML = "";
+  for (const g of groups) {
+    const tr = document.createElement("tr");
+    if (g.alert) tr.classList.add("peak-alert-row");
+    tr.innerHTML = `
+      <td>${g.alert ? '<span class="tag tag-alert">🚨 告警</span>' : "—"}</td>
+      <td>${escapeHtml(g.station)}</td>
+      <td><span class="tag ${g.action === "IN" ? "tag-in" : "tag-out"}">` +
+        `${g.action === "IN" ? "进 ▲" : "出 ▼"}</span></td>
+      <td class="num charge">${g.peak_count}</td>
+      <td class="num">${g.card_count}</td>
+      <td>${g.start_time}</td>
+      <td>${g.end_time}</td>
+      <td class="num">${g.total_count}</td>
+      <td class="line-chip-cell">${peakLineChips(g.lines)}</td>`;
+    tb.appendChild(tr);
+  }
+  tb.querySelectorAll(".line-chip").forEach((chip) => {
+    chip.addEventListener("click", () =>
+      locateRecordLine(Number(chip.dataset.line)));
+  });
+}
+
+async function locateRecordLine(line) {
+  // 以已保存记录为准（忽略文本框中未保存的改动），在「5. 刷卡记录」
+  // 结果表中按原始行号 src_line 定位对应行并高亮。
+  const tb = $("records-table").querySelector("tbody");
+  let row = tb.querySelector(`tr[data-src-line="${line}"]`);
+  if (!row) {
+    // 页面表格可能不是最新的已保存数据，重新拉取后再定位
+    try {
+      const fresh = await api("/api/records");
+      renderRecords(fresh.items);
+      row = tb.querySelector(`tr[data-src-line="${line}"]`);
+    } catch (e) {
+      toast(summaryError(e, "定位原始行失败"), false);
+      return;
+    }
+  }
+  if (!row) {
+    toast(`已保存记录中找不到第 ${line} 行（记录可能已被重新保存）`, false);
+    return;
+  }
+  tb.querySelectorAll("tr.loc-hit").forEach((tr) =>
+    tr.classList.remove("loc-hit"));
+  row.classList.add("loc-hit");
+  row.scrollIntoView({ behavior: "smooth", block: "center" });
+  toast(`已定位到已保存刷卡记录的第 ${line} 行（只读定位，未修改数据）`);
+}
+
+async function runPeakAudit() {
+  const status = $("peak-status");
+  const body = {
+    window_minutes: Number($("peak-window").value),
+    min_alert: Number($("peak-min-alert").value),
+  };
+  if (!Number.isFinite(body.window_minutes) || !Number.isFinite(body.min_alert)) {
+    status.textContent = "统计窗口与最低告警数必须填写为有效数字";
+    status.className = "status bad";
+    return;
+  }
+  status.textContent = "审计中…";
+  status.className = "status";
+  $("peak-errors").hidden = true;
+  $("peak-result").hidden = true;
+  try {
+    const data = await api("/api/station-peak-audit", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    renderPeakAudit(data);
+    status.textContent =
+      `审计完成：${data.group_count} 个站点 / 方向组，${data.alert_count} 组达标` +
+      "（只读，记录 / 配置 / 账单均未改动）";
+    status.className = "status ok";
+    toast("峰值审计完成（只读，未保存任何改动）");
+  } catch (e) {
+    const errors = (e.payload && e.payload.errors) || [];
+    if (errors.length) {
+      renderPeakErrors(errors);
+      status.textContent =
+        `参数不合法，未生成审计结果（数据均未改动）`;
+    } else {
+      status.textContent = summaryError(e, "峰值审计请求失败");
+    }
+    status.className = "status bad";
+    toast("无法执行峰值审计", false);
+  }
+}
+
 /* ---------------- 演示数据 ---------------- */
 
 const DEMO = {
@@ -836,7 +969,18 @@ A001, 2026-09-18 18:20:00, 科技园, 出
 A001, 2026-09-18 19:30:00, 科技园, 进
 A001, 2026-09-18 20:00:00, 中心公园, 出
 B002, 2026-09-19 03:20:00, 科技园, 进
-B002, 2026-09-19 03:45:00, 中心公园, 出`,
+B002, 2026-09-19 03:45:00, 中心公园, 出
+# —— 以下用于「10. 站点闸机峰值审计」演示跨整点早高峰（科技园进站）——
+C003, 2026-09-18 07:56:00, 科技园, 进
+D004, 2026-09-18 07:58:00, 科技园, 进
+E005, 2026-09-18 08:02:00, 科技园, 进
+C003, 2026-09-18 08:05:00, 大学城, 出
+D004, 2026-09-18 08:09:00, 中心公园, 出
+E005, 2026-09-18 08:12:00, 中心公园, 出
+F006, 2026-09-18 08:04:00, 科技园, 进
+F006, 2026-09-18 08:30:00, 中心公园, 出
+G007, 2026-09-18 08:07:00, 科技园, 进
+G007, 2026-09-18 08:40:00, 大学城, 出`,
 };
 
 async function loadDemo() {
@@ -904,6 +1048,7 @@ function bind() {
   $("btn-repair").addEventListener("click", runRepairPreview);
   $("btn-fare-audit").addEventListener("click", runFareAudit);
   $("btn-duration-audit").addEventListener("click", runDurationAudit);
+  $("btn-peak-audit").addEventListener("click", runPeakAudit);
   $("btn-copy-suggests").addEventListener("click", copyAllSuggests);
   $("btn-verify").addEventListener("click", runVerify);
   $("btn-verify-top").addEventListener("click", runVerify);

@@ -19,11 +19,12 @@ from .core import (
     parse_records_text,
     parse_stations_text,
     repair_preview,
+    station_peak_audit,
     trial_compare,
     validate_config,
     verify,
 )
-from .schemas import ConfigIn, TextIn, TrialConfigIn
+from .schemas import ConfigIn, PeakAuditIn, TextIn, TrialConfigIn
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
@@ -38,7 +39,7 @@ app = FastAPI(
     title="公交刷卡票价核验台",
     description="录入站点分区、票价矩阵、换乘抵扣、每日封顶与刷卡记录，"
                 "按卡号配对进出站并核验计价。",
-    version="1.3.0",
+    version="1.4.0",
     lifespan=lifespan,
 )
 
@@ -340,6 +341,43 @@ def run_duration_audit():
         "anomaly_count": len(result.anomalies),
         "anomalies": result.anomalies,
         "insufficient": result.insufficient,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 站点闸机峰值审计（只读：不改记录、配置或账单）
+# ---------------------------------------------------------------------------
+
+@app.post("/api/station-peak-audit")
+def run_station_peak_audit(body: PeakAuditIn):
+    """对已保存刷卡记录做站点闸机峰值审计。
+
+    - 按（站点, 进/出方向）分组，在 1～120 分钟的给定窗口内查找
+      刷卡数最多的半开区间 [开始, 结束)，候选窗口只从实际刷卡时刻起算；
+    - 每组返回峰值刷卡数、起止时刻、涉及卡号数与原始文本行号；
+      峰值数量并列时依次按更早开始时刻、站点名排序；
+    - 峰值刷卡数 >= min_alert 的组标记 alert=true（最低告警数）；
+    - 直接统计已保存刷卡记录，不依赖进出站配对、站点分区与票价；
+    - 全程只读：不修改记录、配置，也不写入或清空账单。
+    """
+    with db.connect() as conn:
+        _stations, _fares, records = db.load_domain(conn)
+        result = station_peak_audit(
+            records, body.window_minutes, body.min_alert)
+
+    if not result.ok:
+        return JSONResponse(
+            status_code=422,
+            content={"ok": False, "errors": result.errors})
+
+    return {
+        "ok": True,
+        "window_minutes": result.window_minutes,
+        "min_alert": result.min_alert,
+        "record_count": result.record_count,
+        "group_count": result.group_count,
+        "alert_count": result.alert_count,
+        "groups": result.groups,
     }
 
 

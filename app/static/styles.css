@@ -164,8 +164,10 @@ td.wrap { white-space: normal; min-width: 240px; }
   margin-top: 12px;
 }
 .errors-panel h3 { color: var(--danger-text); margin-top: 0; }
-#errors-list, #repair-errors-list, #audit-errors-list, #duration-errors-list { margin: 0; padding-left: 20px; }
-#errors-list li, #repair-errors-list li, #audit-errors-list li, #duration-errors-list li {
+#errors-list, #repair-errors-list, #audit-errors-list, #duration-errors-list,
+#peak-errors-list { margin: 0; padding-left: 20px; }
+#errors-list li, #repair-errors-list li, #audit-errors-list li,
+#duration-errors-list li, #peak-errors-list li {
   margin-bottom: 8px;
   color: var(--danger-text);
   font-size: 13px;
@@ -339,3 +341,35 @@ td.wrap { white-space: normal; min-width: 240px; }
 /* ---------------- 行程耗时异常审计 ---------------- */
 .tag-long { background: var(--danger-text); }
 .tag-short { background: #b7791f; }
+
+/* ---------------- 站点闸机峰值审计 ---------------- */
+.tag-alert { background: var(--danger-text); }
+.tag-in { background: var(--save); }
+.tag-out { background: #b7791f; }
+
+tr.peak-alert-row { background: #fff3f3 !important; }
+tr.peak-alert-row td { font-weight: 600; }
+
+.line-chip-cell { white-space: normal; min-width: 200px; }
+.line-chip {
+  font: inherit;
+  font-size: 12px;
+  border: 1px solid var(--primary);
+  color: var(--primary);
+  background: #fff;
+  border-radius: 4px;
+  padding: 1px 8px;
+  margin: 2px 3px 2px 0;
+  cursor: pointer;
+}
+.line-chip:hover { background: #eef3fe; }
+
+#records-table tr.loc-hit {
+  background: #fff0c9 !important;
+  animation: loc-flash 1.6s ease-out 1;
+}
+#records-table tr.loc-hit td { font-weight: 600; }
+@keyframes loc-flash {
+  0% { background: #ffd34d; }
+  100% { background: #fff0c9; }
+}

@@ -340,6 +340,53 @@ A001, 2026-09-18 08:25:00, 中心公园, 出"></textarea>
       </div>
     </section>
 
+    <!-- 站点闸机峰值审计 -->
+    <section class="card" id="sec-peak-audit">
+      <h2>10. 站点闸机峰值审计</h2>
+      <p class="hint">直接统计<strong>已保存</strong>的刷卡记录（与配对 / 票价 / 配置无关）：按
+        <strong>站点 × 进/出方向</strong>分组，在给定的 <strong>1～120 分钟</strong>窗口内查找刷卡数最多的
+        <strong>半开区间 [开始, 结束)</strong>。候选窗口只从<strong>实际刷卡时刻</strong>起算，
+        不做固定整点分桶，因此不会漏掉跨整点边界的高峰；峰值数量并列时依次按更早开始时刻、站点名排序。
+        每组给出峰值刷卡数、窗口起止时刻、<strong>涉及卡号数</strong>与<strong>原始行号</strong>；
+        设置最低告警数后仅标记达标的组（行高亮 + 🚨）。审计<strong>全程只读</strong>：
+        不修改记录、配置或账单。</p>
+      <div class="form-grid">
+        <label>统计窗口（分钟，1～120）
+          <input type="number" id="peak-window" min="1" max="120" value="15" />
+        </label>
+        <label>最低告警数（峰值达到该值才标记）
+          <input type="number" id="peak-min-alert" min="1" value="1" />
+        </label>
+      </div>
+      <div class="row-actions">
+        <button class="btn btn-primary" id="btn-peak-audit" type="button">🚇 运行峰值审计</button>
+        <span id="peak-status" class="status"></span>
+      </div>
+
+      <div id="peak-errors" class="errors-panel" hidden>
+        <h3>❌ 无法执行峰值审计 —— 参数不合法（记录、配置与账单均未改动）</h3>
+        <ul id="peak-errors-list"></ul>
+      </div>
+
+      <div id="peak-result" class="audit-result" hidden>
+        <div id="peak-summary" class="audit-summary"></div>
+
+        <div class="table-wrap">
+          <table id="peak-table">
+            <thead>
+              <tr>
+                <th>告警</th><th>站点</th><th>方向</th>
+                <th>峰值刷卡数</th><th>涉及卡号数</th>
+                <th>窗口开始</th><th>窗口结束（不含）</th>
+                <th>组内总刷卡数</th><th>窗口内原始行号（点击定位）</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
     <footer class="footer">
       FastAPI + SQLite + 原生前端 · 数据保存在容器 /data 卷 ·
       <a href="/docs" target="_blank">API 文档</a>
